@@ -1,0 +1,7 @@
+{
+  "mcpServers": {
+    "obo-demo": {
+      "url": "http://__MCP_HOST__:__MCP_PORT__/"
+    }
+  }
+}

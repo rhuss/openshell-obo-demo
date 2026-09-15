@@ -1,0 +1,62 @@
+version: 1
+filesystem_policy:
+  include_workdir: true
+  # Must be a superset of the sandbox's starting policy. A read_only path cannot
+  # be removed from a live sandbox, so any omission makes `policy set` fail
+  # against a running sandbox rather than tightening anything. The upstream
+  # restrictive default (openshell-policy/src/lib.rs) is
+  # /usr /lib /proc /dev/urandom /app /etc /var/log; the rest are ours.
+  read_only:
+    [/usr, /lib, /lib64, /bin, /proc, /etc, /opt, /app, /var/log, /dev/urandom]
+  read_write: [/sandbox, /tmp, /dev/null, /home/sandbox]
+landlock:
+  compatibility: best_effort
+network_policies:
+  mcp_tools:
+    name: mcp-tools-weather-only
+    endpoints:
+      - host: mcp.default.svc.cluster.local
+        port: 8080
+        protocol: mcp
+        enforcement: enforce
+        # `mcp.versions` is deliberately absent. The field does not exist at the
+        # pinned release (v0.0.116), which accepts only max_body_bytes,
+        # strict_tool_names, and allow_all_known_mcp_methods. Adding it fails
+        # policy parsing outright. Version pinning of the MCP revision is
+        # therefore unavailable here; the tool-scoped rules below are what the
+        # demo actually depends on, and they are unaffected.
+        rules:
+          - allow: { method: initialize }
+          - allow: { method: notifications/initialized }
+          - allow: { method: tools/list }
+          - allow: { method: tools/call, tool: weather_lookup }
+    binaries:
+      - path: /usr/local/bin/claude
+      # A second, agent-free path to the same MCP server, for scripted callers
+      # that need the tool without a model in the loop. Python rather than
+      # curl, deliberately: curl stays off this list, so an interactive shell
+      # in the sandbox cannot reach the MCP server at all. Python lives under
+      # /usr, which the filesystem policy above mounts read-only, so the agent
+      # cannot swap the binary out from under the rule.
+      #
+      # The path is the kernel-resolved target from /proc/<pid>/exe, not the
+      # symlink: /usr/bin/python3 points at python3.12 and naming the symlink
+      # would never match.
+      - path: /usr/bin/python3.12
+
+  # A protected service reached with a delegated credential, in its own block.
+  # `binaries` is scoped per policy block: a connection is allowed only when the
+  # destination and the calling binary match in the SAME block. That is what
+  # lets curl reach this service while remaining refused on the MCP destination
+  # above.
+  protected_service:
+    name: protected-service-delegated
+    endpoints:
+      - host: alpha.default.svc.cluster.local
+        port: 8080
+        protocol: rest
+        access: read-only
+        enforcement: enforce
+    binaries:
+      - path: /usr/local/bin/claude
+      - path: /usr/bin/curl

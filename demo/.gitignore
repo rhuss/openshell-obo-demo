@@ -1,0 +1,15 @@
+# Runtime state - persistent across bring-up runs
+.state/
+
+# Generated configs, captured tokens, container logs
+*.token
+*.jwt
+generated-*.json
+mcp-config.json
+container-*.log
+
+# Recordings (large binary files)
+recordings/*.cast
+
+# OS artifacts
+.DS_Store

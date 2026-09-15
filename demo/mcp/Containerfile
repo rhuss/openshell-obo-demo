@@ -1,0 +1,5 @@
+FROM docker.io/library/node:22.22.1-slim
+WORKDIR /app
+COPY mcp-server.js .
+EXPOSE 8080
+CMD ["node", "mcp-server.js"]

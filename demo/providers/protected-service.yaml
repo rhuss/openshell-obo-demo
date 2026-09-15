@@ -1,0 +1,129 @@
+# Provider profile for the demo's protected service.
+#
+# A profile is a declaration, not code: it tells the gateway what credentials
+# exist, how to obtain them, and where they may be used. The gateway does the
+# RFC 8693 token exchange from this file alone. Nothing here is demo-specific
+# except the hostnames.
+#
+# ── A note on *.default.svc.cluster.local ────────────────────────────────────
+#
+# These look like Kubernetes service names, and that is deliberate, but there is
+# no Kubernetes here. The shape is Kubernetes' DNS convention:
+#
+#   <service>.<namespace>.svc.cluster.local
+#     alpha   . default   .svc.cluster.local
+#
+# In this demo they are Podman network aliases. Every container joins the
+# `openshell` bridge network, which has `dns_enabled=true`, and bring-up passes
+# `--network-alias alpha.default.svc.cluster.local` when it starts the
+# container. Podman's built-in DNS then resolves that name for any other
+# container on the same network. `podman inspect` shows the alias; nothing
+# resolves it from the host or from inside the sandbox without the proxy.
+#
+# The point of the disguise: the names the policy and this profile match on are
+# the same ones a real Kubernetes deployment would use, so the policy does not
+# change shape when this moves off a laptop. It also means an alias typo fails
+# as a DNS error deep inside the proxy rather than as a policy error, which is
+# worth knowing when debugging.
+
+id: obo-demo
+display_name: OBO demo delegated access
+description: Dynamic token exchange for the demo protected service using stored user subject tokens and SPIFFE JWT-SVID authentication
+category: other
+
+credentials:
+  # The user's token, handed to the gateway once and never again.
+  #
+  # It has no auth_style and no env_vars, and that absence is the whole point:
+  # a credential with no injection rules is never placed in a sandbox. The
+  # gateway logs "skipping non-injectable provider credential handle" when it
+  # builds the sandbox environment. It exists only as bootstrap material for
+  # the exchange below.
+  - name: subject_token
+    description: Demo user subject token stored for gateway-side token exchange only
+    required: true
+
+  # The credential the sandbox actually uses. Never stored: minted per request
+  # from the subject token above, and delivered as an `openshell:resolve:env:`
+  # placeholder that only the egress proxy can resolve.
+  - name: access_token
+    description: Access token obtained via RFC 8693 token exchange
+    required: false
+    # How the proxy presents it upstream: `Authorization: Bearer <token>`.
+    # The sandbox never assembles this header itself.
+    auth_style: bearer
+    header_name: Authorization
+
+    token_grant:
+      # RFC 8693 token exchange. The gateway swaps a token it holds for a
+      # narrower one scoped to the destination being called.
+      grant_type: token_exchange
+
+      # Where the exchange happens. Resolved by Podman DNS from the gateway
+      # container, which sits on the same `openshell` network as the issuer.
+      # The sandbox cannot reach this endpoint at all: it is not in the
+      # sandbox's policy, so the exchange is not something the agent can drive.
+      token_endpoint: http://token-issuer.default.svc.cluster.local:8080/token
+
+      # Default audience for destinations with no override below. The demo's
+      # only real destination is `alpha`, so this value is effectively a
+      # fallback that never gets used.
+      audience: demo-default
+
+      # How the gateway proves *it* is the gateway, rather than anyone who can
+      # reach the token endpoint. It presents a SPIFFE JWT-SVID, and this is
+      # the audience that SVID must carry. The issuer checks it exactly, along
+      # with the issuer claim and the subject prefix, before it will mint
+      # anything. A mismatch here surfaces as a bare `invalid_client`.
+      jwt_svid_audience: http://token-issuer.default.svc.cluster.local:8080
+
+      # Tells the issuer the client assertion is a SPIFFE JWT-SVID rather than
+      # a client secret. This is what replaces a shared credential between
+      # gateway and issuer: there is nothing to leak, and the SVID is short
+      # lived and workload-bound.
+      client_assertion_type: urn:ietf:params:oauth:client-assertion-type:jwt-spiffe
+
+      scopes: [demo]
+
+      # Minted tokens are reused for 60s. Short enough that a revoked subject
+      # token stops working quickly, long enough that a chatty agent does not
+      # force an exchange per HTTP request. The issuer's own tokens live 300s.
+      cache_ttl_seconds: 60
+
+      subject_token:
+        # Take the subject token from a stored provider credential, rather than
+        # from the request. The sandbox has no way to supply or influence it.
+        source: provider_credential
+        credential: subject_token
+        subject_token_type: urn:ietf:params:oauth:token-type:access_token
+
+      # Per-destination narrowing, and the reason this is delegation rather
+      # than a shared key. A token minted for a request to alpha carries
+      # `aud: alpha` and `scope: alpha`, so it is useless anywhere else. Add a
+      # second protected service and it gets its own entry and its own
+      # audience; neither service can replay the other's token.
+      audience_overrides:
+        - host: alpha.default.svc.cluster.local
+          port: 8080
+          audience: alpha
+          scopes: [alpha]
+
+# Endpoints this provider declares. With `providers_v2_enabled` these are
+# folded into the sandbox policy automatically, so the destination does not
+# have to be listed in the policy by hand.
+#
+# `protocol: rest` makes the proxy terminate and inspect each HTTP request, and
+# is what allows method and path rules. `enforcement: enforce` refuses on
+# violation rather than only recording it.
+endpoints:
+  - host: alpha.default.svc.cluster.local
+    port: 8080
+    protocol: rest
+    tls: none
+    access: read-write
+    enforcement: enforce
+
+# Which program may use this credential. Matched against the kernel-resolved
+# `/proc/<pid>/exe`, so a symlink never matches: name the real target.
+binaries:
+  - /usr/local/bin/claude
